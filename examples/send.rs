@@ -4,8 +4,8 @@
 //!
 //! ```sh
 //! export QQBOT_APP_ID=… QQBOT_SECRET=…
-//! echo 早 | cargo run -p qqbot --example send -- group <group_openid> [markdown] [picture <path> | file <path>] [quote <msg_idx>]
-//! cargo run -p qqbot --example send -- group <group_openid> recall <id>
+//! echo 早 | cargo run --example send -- group <group_openid> [markdown] [picture <path> | file <path>] [quote <msg_idx>]
+//! cargo run --example send -- group <group_openid> recall <id>
 //! ```
 
 #![expect(clippy::print_stdout, reason = "printing QQ's answer is the point")]

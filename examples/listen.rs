@@ -2,7 +2,7 @@
 //! dispatches, until interrupted. Sends nothing.
 //!
 //! ```sh
-//! QQBOT_APP_ID=… QQBOT_SECRET=… cargo run -p qqbot --example listen
+//! QQBOT_APP_ID=… QQBOT_SECRET=… cargo run --example listen
 //! ```
 
 #![expect(

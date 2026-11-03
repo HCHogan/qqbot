@@ -1,0 +1,6 @@
+# max builds this crate with its own toolchain; this one is for working
+# on it alone. Bump it in a commit of its own.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

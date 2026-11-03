@@ -1,8 +1,8 @@
 //! QQ's official bot API (QQ 开放平台): access tokens, the WebSocket
 //! gateway, event and REST types, sending, recalling and muting.
 //!
-//! This crate knows nothing about Max. Mapping QQ messages to Max's nodes
-//! happens in the `max` crate.
+//! It was written for Max (<https://github.com/HCHogan/max>), a group chat
+//! bot, but knows nothing about it: Max maps QQ's messages to its own.
 
 pub mod api;
 pub mod connection;
