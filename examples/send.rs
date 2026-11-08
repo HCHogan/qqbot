@@ -12,7 +12,7 @@
 
 use std::io::Read;
 
-use qqbot::api::Media;
+use qqbot::api::{Content, Media};
 use qqbot::{Body, Chat, Client, Credentials, Outgoing};
 
 #[tokio::main(flavor = "current_thread")]
@@ -59,8 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
             }
             "picture" => {
-                let bytes = std::fs::read(arg(1)?)?;
-                let uploaded = client.upload(chat, Media::Picture(&bytes)).await?;
+                let path = std::path::Path::new(arg(1)?);
+                let uploaded = client
+                    .upload(chat, Media::Picture(Content::Path(path)))
+                    .await?;
                 println!("uploaded, for {}s", uploaded.ttl);
                 message.body = Body::Media {
                     file_info: uploaded.file_info,
@@ -70,7 +72,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "file" => {
                 let path = std::path::Path::new(arg(1)?);
-                let bytes = std::fs::read(path)?;
                 let name = path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -80,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         chat,
                         Media::File {
                             name,
-                            bytes: &bytes,
+                            content: Content::Path(path),
                         },
                     )
                     .await?;

@@ -1,6 +1,8 @@
 //! The REST side: access tokens, and the calls Max makes.
 
 use std::fmt;
+use std::io::{self, SeekFrom};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -10,6 +12,8 @@ use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha1::Sha1;
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::Mutex;
 
 use crate::message::{Outgoing, Sent};
@@ -30,9 +34,11 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The most uploaded in one request, base64 in the JSON; more goes in
 /// parts. Tried on 2026-10-29: 6 MiB went in one, 8 MiB didn't (850012).
-const AT_ONCE: usize = 5 << 20;
+const AT_ONCE: u64 = 5 << 20;
 /// How much of a file `md5_10m` is the MD5 of.
-const MD5_10M: usize = 10_002_432;
+const MD5_10M: u64 = 10_002_432;
+/// How much of a file is read at once to work out its digests.
+const DIGESTED_AT_ONCE: u64 = 1 << 20;
 
 #[derive(Clone)]
 pub struct Credentials {
@@ -69,6 +75,8 @@ pub enum Error {
     },
     #[error("QQ's parts for an upload don't fit the file: {0}")]
     Parts(String),
+    #[error("couldn't read what is uploaded: {0}")]
+    Read(#[from] io::Error),
 }
 
 impl Error {
@@ -103,9 +111,18 @@ impl Chat<'_> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Media<'a> {
     /// PNG, JPEG or GIF, which stays animated.
-    Picture(&'a [u8]),
+    Picture(Content<'a>),
     /// Anything, shown and saved under its name.
-    File { name: &'a str, bytes: &'a [u8] },
+    File { name: &'a str, content: Content<'a> },
+}
+
+/// Where the bytes of what is uploaded are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Content<'a> {
+    Bytes(&'a [u8]),
+    /// A file, read a piece at a time: one too big to hold. It mustn't
+    /// change while it is uploaded.
+    Path(&'a Path),
 }
 
 impl<'a> Media<'a> {
@@ -116,9 +133,9 @@ impl<'a> Media<'a> {
         }
     }
 
-    fn bytes(self) -> &'a [u8] {
+    fn content(self) -> Content<'a> {
         match self {
-            Self::Picture(bytes) | Self::File { bytes, .. } => bytes,
+            Self::Picture(content) | Self::File { content, .. } => content,
         }
     }
 
@@ -319,15 +336,18 @@ impl Client {
     }
 
     /// Uploads a picture or file to send to `chat`, as many times as it
-    /// likes while it lasts: in one request up to 5 MiB, in parts past it.
+    /// likes while it lasts: in one request up to 5 MiB, in parts past it,
+    /// each read when it is sent.
     pub async fn upload(&self, chat: Chat<'_>, media: Media<'_>) -> Result<Uploaded, Error> {
-        if media.bytes().len() > AT_ONCE {
-            return self.upload_in_parts(chat, media).await;
+        let mut reader = Reader::open(media.content()).await?;
+        if reader.size > AT_ONCE {
+            return self.upload_in_parts(chat, media, reader).await;
         }
+        let bytes = reader.read(0, reader.size).await?;
         let upload = Upload {
             file_type: media.file_type(),
             file_name: matches!(media, Media::File { .. }).then(|| media.name()),
-            file_data: STANDARD.encode(media.bytes()),
+            file_data: STANDARD.encode(bytes),
             srv_send_msg: false,
         };
         self.call(Method::POST, &chat.path("files"), Some(&upload))
@@ -336,26 +356,25 @@ impl Client {
 
     /// QQ hands out where to put each part, one after another, and puts
     /// them together once all are reported.
-    async fn upload_in_parts(&self, chat: Chat<'_>, media: Media<'_>) -> Result<Uploaded, Error> {
-        let bytes = media.bytes();
-        let prepare = Prepare {
-            file_type: media.file_type(),
-            file_name: media.name(),
-            file_size: bytes.len() as u64,
-            md5: hex(&Md5::digest(bytes)),
-            sha1: hex(&Sha1::digest(bytes)),
-            md5_10m: hex(&Md5::digest(&bytes[..bytes.len().min(MD5_10M)])),
-        };
+    async fn upload_in_parts(
+        &self,
+        chat: Chat<'_>,
+        media: Media<'_>,
+        mut reader: Reader<'_>,
+    ) -> Result<Uploaded, Error> {
+        let prepare = prepare(media, &mut reader).await?;
         let prepared: Prepared = self
             .call(Method::POST, &chat.path("upload_prepare"), Some(&prepare))
             .await?;
         for part in &prepared.parts {
-            let piece = piece(bytes, prepared.block_size, part)?;
+            let (start, len) = span(reader.size, prepared.block_size, part)?;
+            let piece = reader.read(start, len).await?;
+            let md5 = hex(&Md5::digest(&piece));
             let response = self
                 .http
                 .put(&part.presigned_url)
                 .header("Content-Type", "application/octet-stream")
-                .body(piece.to_vec())
+                .body(piece)
                 .send()
                 .await?;
             let status = response.status();
@@ -372,7 +391,7 @@ impl Client {
                 upload_id: &prepared.upload_id,
                 part_index: part.index,
                 block_size: part.block_size,
-                md5: hex(&Md5::digest(piece)),
+                md5,
             };
             let _: serde_json::Value = self
                 .call(Method::POST, &chat.path("upload_part_finish"), Some(&done))
@@ -443,22 +462,92 @@ impl Client {
     }
 }
 
-/// The bytes of `part`, if they are within the file.
-fn piece<'a>(bytes: &'a [u8], block_size: u64, part: &Part) -> Result<&'a [u8], Error> {
+/// What is uploaded, opened to be read a piece at a time.
+struct Reader<'a> {
+    source: Source<'a>,
+    size: u64,
+}
+
+enum Source<'a> {
+    Bytes(&'a [u8]),
+    File(File),
+}
+
+impl<'a> Reader<'a> {
+    async fn open(content: Content<'a>) -> io::Result<Self> {
+        Ok(match content {
+            Content::Bytes(bytes) => Self {
+                source: Source::Bytes(bytes),
+                size: bytes.len() as u64,
+            },
+            Content::Path(path) => {
+                let file = File::open(path).await?;
+                let size = file.metadata().await?.len();
+                Self {
+                    source: Source::File(file),
+                    size,
+                }
+            }
+        })
+    }
+
+    /// The `len` bytes from `start`.
+    async fn read(&mut self, start: u64, len: u64) -> io::Result<Vec<u8>> {
+        let past = || io::Error::new(io::ErrorKind::UnexpectedEof, "past the end");
+        match &mut self.source {
+            Source::Bytes(bytes) => {
+                let start = usize::try_from(start).map_err(|_| past())?;
+                let len = usize::try_from(len).map_err(|_| past())?;
+                let end = start.checked_add(len).ok_or_else(past)?;
+                bytes.get(start..end).map(<[u8]>::to_vec).ok_or_else(past)
+            }
+            Source::File(file) => {
+                let mut piece = vec![0; usize::try_from(len).map_err(|_| past())?];
+                file.seek(SeekFrom::Start(start)).await?;
+                file.read_exact(&mut piece).await?;
+                Ok(piece)
+            }
+        }
+    }
+}
+
+/// What `upload_prepare` is told of `media`, read from `reader` a piece at
+/// a time for its digests.
+async fn prepare<'a>(media: Media<'a>, reader: &mut Reader<'_>) -> io::Result<Prepare<'a>> {
+    let (mut md5, mut sha1, mut md5_10m) = (Md5::new(), Sha1::new(), Md5::new());
+    let mut at = 0;
+    while at < reader.size {
+        let len = DIGESTED_AT_ONCE.min(reader.size - at);
+        let piece = reader.read(at, len).await?;
+        md5.update(&piece);
+        sha1.update(&piece);
+        let head = MD5_10M.saturating_sub(at).min(len);
+        md5_10m.update(&piece[..usize::try_from(head).unwrap_or(piece.len())]);
+        at += len;
+    }
+    Ok(Prepare {
+        file_type: media.file_type(),
+        file_name: media.name(),
+        file_size: reader.size,
+        md5: hex(&md5.finalize()),
+        sha1: hex(&sha1.finalize()),
+        md5_10m: hex(&md5_10m.finalize()),
+    })
+}
+
+/// Where `part` starts in a file of `size` bytes, and how long it is, if
+/// it is within it.
+fn span(size: u64, block_size: u64, part: &Part) -> Result<(u64, u64), Error> {
     let start = part
         .index
         .checked_sub(1)
         .and_then(|before| before.checked_mul(block_size));
     let end = start.and_then(|start| start.checked_add(part.block_size));
     match (start, end) {
-        (Some(start), Some(end)) if start < end && end <= bytes.len() as u64 => {
-            Ok(&bytes[start as usize..end as usize])
-        }
+        (Some(start), Some(end)) if start < end && end <= size => Ok((start, part.block_size)),
         _ => Err(Error::Parts(format!(
-            "part {} of {} bytes, each {block_size}, in {}",
-            part.index,
-            part.block_size,
-            bytes.len()
+            "part {} of {} bytes, each {block_size}, in {size}",
+            part.index, part.block_size,
         ))),
     }
 }
@@ -617,7 +706,7 @@ mod tests {
     #[test]
     fn uploads_at_once() {
         let picture = Upload {
-            file_type: Media::Picture(b"").file_type(),
+            file_type: Media::Picture(Content::Bytes(b"")).file_type(),
             file_name: None,
             file_data: "AA==".into(),
             srv_send_msg: false,
@@ -628,7 +717,7 @@ mod tests {
         );
         let file = Media::File {
             name: "报告.pdf",
-            bytes: b"",
+            content: Content::Bytes(b""),
         };
         assert_eq!((file.file_type(), file.name()), (4, "报告.pdf"));
     }
@@ -647,24 +736,66 @@ mod tests {
             "upload_config":{"concurrency":1,"retry_timeout":300,"retry_delay":1}}"#;
         let prepared: Prepared =
             decode("/v2/groups/G1/upload_prepare", StatusCode::OK, body).unwrap();
-        let file = vec![7u8; 12 << 20];
-        let pieces: Vec<usize> = prepared
+        let size = 12 << 20;
+        let spans: Vec<(u64, u64)> = prepared
             .parts
             .iter()
-            .map(|part| piece(&file, prepared.block_size, part).unwrap().len())
+            .map(|part| span(size, prepared.block_size, part).unwrap())
             .collect();
-        assert_eq!(pieces, [10 << 20, 2 << 20]);
+        assert_eq!(spans, [(0, 10 << 20), (10 << 20, 2 << 20)]);
         let past = Part {
             index: 3,
             presigned_url: String::new(),
             block_size: 1,
         };
         assert!(matches!(
-            piece(&file, prepared.block_size, &past),
+            span(size, prepared.block_size, &past),
             Err(Error::Parts(_))
         ));
         let zeroth = Part { index: 0, ..past };
-        assert!(piece(&file, prepared.block_size, &zeroth).is_err());
+        assert!(span(size, prepared.block_size, &zeroth).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_file_is_read_a_piece_at_a_time() {
+        // Past md5_10m's share, and not a whole number of pieces.
+        let bytes: Vec<u8> = (0..12_345_678u32).map(|i| (i % 251) as u8).collect();
+        let path = std::env::temp_dir().join(format!("qqbot-upload-{}", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let media = |content| Media::File {
+            name: "a.bin",
+            content,
+        };
+        let mut from_file = Reader::open(Content::Path(&path)).await.unwrap();
+        let mut held = Reader::open(Content::Bytes(&bytes)).await.unwrap();
+        let read = prepare(media(Content::Path(&path)), &mut from_file).await;
+        let digested = |prepare: Prepare<'_>| {
+            (
+                prepare.file_size,
+                prepare.md5,
+                prepare.sha1,
+                prepare.md5_10m,
+            )
+        };
+        let read = digested(read.unwrap());
+        assert_eq!(
+            read,
+            digested(
+                prepare(media(Content::Bytes(&bytes)), &mut held)
+                    .await
+                    .unwrap()
+            )
+        );
+        assert_eq!(read.0, bytes.len() as u64);
+        assert_eq!(read.1, hex(&Md5::digest(&bytes)));
+        assert_eq!(read.3, hex(&Md5::digest(&bytes[..10_002_432])));
+        // Pieces are read wherever they are, after the digests or before.
+        let piece = from_file.read(10 << 20, 5).await.unwrap();
+        assert_eq!(piece, bytes[10 << 20..][..5]);
+        assert_eq!(from_file.read(0, 3).await.unwrap(), bytes[..3]);
+        assert!(from_file.read(bytes.len() as u64 - 1, 2).await.is_err());
+        assert!(held.read(bytes.len() as u64 - 1, 2).await.is_err());
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
