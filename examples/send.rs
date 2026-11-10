@@ -1,11 +1,13 @@
-//! Sends one message, or recalls one, for trying things against the real
-//! API. The message's text comes from stdin; with a picture, it is the
-//! text under it, and a file goes without it.
+//! Sends one message, recalls one, or shows what QQ says of a group, for
+//! trying things against the real API. The message's text comes from
+//! stdin; with a picture, it is the text under it, and a file goes without
+//! it.
 //!
 //! ```sh
 //! export QQBOT_APP_ID=… QQBOT_SECRET=…
 //! echo 早 | cargo run --example send -- group <group_openid> [markdown] [picture <path> | file <path>] [quote <msg_idx>]
 //! cargo run --example send -- group <group_openid> recall <id>
+//! cargo run --example send -- group <group_openid> info
 //! ```
 
 #![expect(clippy::print_stdout, reason = "printing QQ's answer is the point")]
@@ -36,6 +38,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         client.recall(chat, id).await?;
         println!("recalled");
+        return Ok(());
+    }
+    if let [info] = rest
+        && info == "info"
+    {
+        let Chat::Group(group) = chat else {
+            return Err("info is a group's".into());
+        };
+        println!("{:?}", client.info(group).await?);
         return Ok(());
     }
     let mut text = String::new();

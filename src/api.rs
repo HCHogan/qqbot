@@ -243,6 +243,17 @@ pub struct Muted {
     pub mute_expire_at: String,
 }
 
+/// A group as QQ describes it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct GroupInfo {
+    pub group_name: String,
+    /// Its introduction (群简介); empty if it has none.
+    #[serde(default)]
+    pub group_finger_memo: String,
+    #[serde(default)]
+    pub group_member_num: u64,
+}
+
 /// The bot itself.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Me {
@@ -413,6 +424,14 @@ impl Client {
         let path = format!("{}/{message_id}", chat.path("messages"));
         let _: serde_json::Value = self.call(Method::DELETE, &path, None::<&()>).await?;
         Ok(())
+    }
+
+    /// A group's name, introduction and size. QQ's documentation keeps
+    /// this for bots on an allowlist, but it answered one that isn't on
+    /// 2026-10-29 and 2026-11-10; the bot needn't be an admin.
+    pub async fn info(&self, group: &str) -> Result<GroupInfo, Error> {
+        let path = format!("/v2/groups/{group}/info");
+        self.call(Method::GET, &path, None::<&()>).await
     }
 
     /// The members muted in a group now, besides any mute of the whole
@@ -820,6 +839,23 @@ mod tests {
         let value: serde_json::Value = decode(path, StatusCode::OK, body).unwrap();
         let muted: Vec<Muted> = serde_json::from_value(value["members"].clone()).unwrap();
         assert_eq!(muted[0].member_openid, "M1");
+    }
+
+    #[test]
+    fn a_group() {
+        // As QQ answered on 2026-11-10, with made-up values.
+        let body = r#"{"group_openid":"G1","group_name":"示波器同好会","group_finger_memo":"修示波器的",
+            "group_class_text":"行业交流-IT/互联网","group_tags":["示波器"],"group_member_num":34}"#;
+        let info: GroupInfo =
+            decode("/v2/groups/G1/info", StatusCode::OK, body.as_bytes()).unwrap();
+        assert_eq!(
+            info,
+            GroupInfo {
+                group_name: "示波器同好会".into(),
+                group_finger_memo: "修示波器的".into(),
+                group_member_num: 34,
+            }
+        );
     }
 
     #[test]
