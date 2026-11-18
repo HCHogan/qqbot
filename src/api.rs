@@ -112,6 +112,10 @@ impl Chat<'_> {
 pub enum Media<'a> {
     /// PNG, JPEG or GIF, which stays animated.
     Picture(Content<'a>),
+    /// A voice message, shown as a bar that plays. QQ converts what it is
+    /// given, and knows it by its content: MP3, WAV and Ogg went up on
+    /// 2026-11-18, and what isn't audio is refused, 40093008.
+    Voice(Content<'a>),
     /// Anything, shown and saved under its name.
     File { name: &'a str, content: Content<'a> },
 }
@@ -129,26 +133,30 @@ impl<'a> Media<'a> {
     fn file_type(self) -> u8 {
         match self {
             Self::Picture(_) => 1,
+            Self::Voice(_) => 3,
             Self::File { .. } => 4,
         }
     }
 
     fn content(self) -> Content<'a> {
         match self {
-            Self::Picture(content) | Self::File { content, .. } => content,
+            Self::Picture(content) | Self::Voice(content) | Self::File { content, .. } => content,
         }
     }
 
-    /// A picture's isn't shown, but the upload in parts asks for one.
+    /// A picture's and a voice message's aren't shown, but the upload in
+    /// parts asks for one.
     fn name(self) -> &'a str {
         match self {
             Self::Picture(_) => "picture",
+            Self::Voice(_) => "voice",
             Self::File { name, .. } => name,
         }
     }
 }
 
-/// A picture or file uploaded to a chat: a message sends its `file_info`.
+/// A picture, voice message or file uploaded to a chat: a message sends
+/// its `file_info`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Uploaded {
     pub file_info: String,
@@ -346,9 +354,9 @@ impl Client {
             .await
     }
 
-    /// Uploads a picture or file to send to `chat`, as many times as it
-    /// likes while it lasts: in one request up to 5 MiB, in parts past it,
-    /// each read when it is sent.
+    /// Uploads a picture, voice message or file to send to `chat`, as many
+    /// times as it likes while it lasts: in one request up to 5 MiB, in
+    /// parts past it, each read when it is sent.
     pub async fn upload(&self, chat: Chat<'_>, media: Media<'_>) -> Result<Uploaded, Error> {
         let mut reader = Reader::open(media.content()).await?;
         if reader.size > AT_ONCE {
@@ -734,6 +742,8 @@ mod tests {
             serde_json::to_value(&picture).unwrap(),
             serde_json::json!({ "file_type": 1, "file_data": "AA==", "srv_send_msg": false })
         );
+        let voice = Media::Voice(Content::Bytes(b""));
+        assert_eq!((voice.file_type(), voice.name()), (3, "voice"));
         let file = Media::File {
             name: "报告.pdf",
             content: Content::Bytes(b""),

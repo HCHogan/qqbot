@@ -19,7 +19,8 @@ pub enum Body {
     /// since 2026-04-23.
     Markdown(String),
     /// A picture uploaded to the chat, with text under it in the same
-    /// bubble; without, it looks like any picture or sticker sent.
+    /// bubble; without, it looks like any picture or sticker sent. A
+    /// voice message or a file uploaded goes the same way, without text.
     Media {
         file_info: String,
         caption: Option<String>,

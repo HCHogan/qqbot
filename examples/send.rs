@@ -1,11 +1,11 @@
 //! Sends one message, recalls one, or shows what QQ says of a group, for
 //! trying things against the real API. The message's text comes from
-//! stdin; with a picture, it is the text under it, and a file goes without
-//! it.
+//! stdin; with a picture, it is the text under it, and a voice message or
+//! a file goes without it.
 //!
 //! ```sh
 //! export QQBOT_APP_ID=… QQBOT_SECRET=…
-//! echo 早 | cargo run --example send -- group <group_openid> [markdown] [picture <path> | file <path>] [quote <msg_idx>]
+//! echo 早 | cargo run --example send -- group <group_openid> [markdown] [picture <path> | voice <path> | file <path>] [quote <msg_idx>]
 //! cargo run --example send -- group <group_openid> recall <id>
 //! cargo run --example send -- group <group_openid> info
 //! ```
@@ -78,6 +78,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 message.body = Body::Media {
                     file_info: uploaded.file_info,
                     caption: Some(text.trim_end().to_owned()).filter(|text| !text.is_empty()),
+                };
+                i += 2;
+            }
+            "voice" => {
+                let path = std::path::Path::new(arg(1)?);
+                let uploaded = client
+                    .upload(chat, Media::Voice(Content::Path(path)))
+                    .await?;
+                println!("uploaded, for {}s", uploaded.ttl);
+                message.body = Body::Media {
+                    file_info: uploaded.file_info,
+                    caption: None,
                 };
                 i += 2;
             }
