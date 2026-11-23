@@ -7,6 +7,8 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::transcript::Transcript;
+
 /// One dispatched event.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Dispatch {
@@ -127,6 +129,21 @@ pub struct Element {
 
 pub const QUOTED: i64 = 103;
 
+/// A merged forward's `message_type`.
+pub const FORWARD: i64 = 102;
+
+impl Element {
+    /// What QQ writes in place of a quoted message that quotes another or
+    /// holds a forward: a transcript of the one message.
+    pub fn dump(&self) -> Option<Transcript> {
+        let content = self.content.as_deref()?;
+        content
+            .starts_with("=== 消息 ")
+            .then(|| Transcript::parse(content))
+            .flatten()
+    }
+}
+
 /// A message, in a group or a private chat.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Message {
@@ -151,9 +168,20 @@ pub struct Message {
     pub message_scene: Scene,
     #[serde(default)]
     pub msg_elements: Vec<Element>,
+    /// 0 text, 3 card, 102 a merged forward, 103 a message that quotes.
+    #[serde(default)]
+    pub message_type: Option<i64>,
 }
 
 impl Message {
+    /// A merged forward's messages: QQ sends a transcript of them in
+    /// place of its text.
+    pub fn forward(&self) -> Option<Transcript> {
+        (self.message_type == Some(FORWARD))
+            .then(|| Transcript::parse(&self.content))
+            .flatten()
+    }
+
     /// The id to quote this message by.
     pub fn msg_idx(&self) -> Option<&str> {
         self.message_scene.ext("msg_idx")
