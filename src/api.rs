@@ -87,6 +87,37 @@ impl Error {
             _ => None,
         }
     }
+
+    /// Whether the request may have reached QQ though no whole answer came
+    /// back, so that a message may have gone out: it was sent and the
+    /// connection failed after, or the answer didn't parse.
+    pub fn may_have_arrived(&self) -> bool {
+        match self {
+            Self::Http(error) => !error.is_connect() && !error.is_builder(),
+            Self::Decode { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// What QQ's refusal means, where its code is known.
+    pub fn refusal(&self) -> Option<Refusal> {
+        match self.code()? {
+            40062003 => Some(Refusal::NoPermission),
+            40064004 => Some(Refusal::TooLateToRecall),
+            _ => None,
+        }
+    }
+}
+
+/// Refusals whose codes say what they mean.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// 40062003 无操作权限: the bot may recall someone else's message in a
+    /// group only as an admin, and the owner's and admins' not at all.
+    NoPermission,
+    /// 40064004: no message can be recalled over 2 minutes after it was
+    /// sent.
+    TooLateToRecall,
 }
 
 /// A chat to send to: a group by its `group_openid`, or a person in a
