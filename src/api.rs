@@ -102,6 +102,7 @@ impl Error {
     /// What QQ's refusal means, where its code is known.
     pub fn refusal(&self) -> Option<Refusal> {
         match self.code()? {
+            40011030 => Some(Refusal::NotAnAdmin),
             40062003 => Some(Refusal::NoPermission),
             40064004 => Some(Refusal::TooLateToRecall),
             _ => None,
@@ -112,6 +113,9 @@ impl Error {
 /// Refusals whose codes say what they mean.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
+    /// 40011030 机器人不是群管理员: what only a group's admins may do,
+    /// such as muting, and the bot isn't one.
+    NotAnAdmin,
     /// 40062003 无操作权限: the bot may recall someone else's message in a
     /// group only as an admin, and the owner's and admins' not at all.
     NoPermission,
