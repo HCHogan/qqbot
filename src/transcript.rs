@@ -23,6 +23,8 @@
 //! [`Message::forward`]: crate::event::Message::forward
 //! [`Element::dump`]: crate::event::Element::dump
 
+use crate::event::with_scheme;
+
 /// A transcript's messages, and its title if it has one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Transcript {
@@ -273,7 +275,7 @@ fn file(line: &str) -> Option<File> {
             other => FileKind::Other(other.to_owned()),
         },
         name,
-        url: url.map(str::to_owned),
+        url: url.map(with_scheme),
     })
 }
 

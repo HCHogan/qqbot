@@ -7,6 +7,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::content::{self, Segment};
 use crate::transcript::Transcript;
 
 /// One dispatched event.
@@ -79,6 +80,26 @@ pub struct User {
     pub is_you: bool,
 }
 
+/// A member's role in a group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Owner,
+    Admin,
+    Member,
+}
+
+impl User {
+    /// Their role, in a group; QQ documents only owner, admin and member,
+    /// and anything else is a member.
+    pub fn role(&self) -> Option<Role> {
+        self.member_role.as_deref().map(|role| match role {
+            "owner" => Role::Owner,
+            "admin" => Role::Admin,
+            _ => Role::Member,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Attachment {
@@ -93,6 +114,49 @@ pub struct Attachment {
     pub voice_wav_url: Option<String>,
     /// Tencent's transcript of a voice message.
     pub asr_refer_text: Option<String>,
+}
+
+/// What an attachment is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachmentKind {
+    Picture,
+    Video,
+    /// A voice message.
+    Voice,
+    /// Anything else, videos sent as files included.
+    File,
+}
+
+impl Attachment {
+    /// What it is, by its `content_type`: `image/…`, `video/…`, `voice`
+    /// or `audio/…`, and anything else, `file` included, a file.
+    pub fn kind(&self) -> AttachmentKind {
+        match self.content_type.as_deref().unwrap_or_default() {
+            mime if mime.starts_with("image/") => AttachmentKind::Picture,
+            mime if mime.starts_with("video/") => AttachmentKind::Video,
+            mime if mime == "voice" || mime.starts_with("audio/") => AttachmentKind::Voice,
+            _ => AttachmentKind::File,
+        }
+    }
+
+    /// Where to download it: for a voice message, which is SILK or AMR,
+    /// its WAV, which can be played.
+    pub fn download_url(&self) -> Option<String> {
+        let url = match self.kind() {
+            AttachmentKind::Voice => self.voice_wav_url.as_ref().or(self.url.as_ref()),
+            _ => self.url.as_ref(),
+        };
+        url.map(|url| with_scheme(url))
+    }
+}
+
+/// QQ sometimes leaves the scheme off a download link.
+pub(crate) fn with_scheme(url: &str) -> String {
+    if url.contains("://") {
+        url.to_owned()
+    } else {
+        format!("https://{}", url.trim_start_matches('/'))
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -174,6 +238,20 @@ pub struct Message {
 }
 
 impl Message {
+    /// Its content: text, mentions and faces.
+    pub fn segments(&self) -> Vec<Segment> {
+        content::parse(&self.content)
+    }
+
+    /// Who `<@openid>` mentions, as `mentions` has them.
+    pub fn mentioned(&self, openid: &str) -> Option<&User> {
+        self.mentions.iter().find(|user| {
+            [&user.member_openid, &user.id, &user.user_openid]
+                .into_iter()
+                .any(|id| id.as_deref() == Some(openid))
+        })
+    }
+
     /// A merged forward's messages: QQ sends a transcript of them in
     /// place of its text.
     pub fn forward(&self) -> Option<Transcript> {
